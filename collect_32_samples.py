@@ -6,6 +6,7 @@ import os
 import json
 import sys
 import time
+import numpy as np
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
@@ -39,8 +40,8 @@ def load_samples():
             'repo_name': extra_info.get('repo_name', ''),
             'docker_image': extra_info.get('docker_image', ''),
             'commit_hash': extra_info.get('commit_hash', ''),
-            'problem_statement': row['prompt'],  # Use prompt as problem_statement
-            'prompt': row['prompt'],
+            'problem_statement': extra_info.get('problem_statement', ''),
+            'prompt': row['prompt'].tolist() if hasattr(row['prompt'], 'tolist') else row['prompt'],
             'parsed_commit_content': extra_info.get('parsed_commit_content', '{}'),
             'execution_result_content': extra_info.get('execution_result_content', ''),
             'modified_files': extra_info.get('modified_files', []),
@@ -89,9 +90,9 @@ def run_agent_on_sample(sample, idx, total):
         
         # Get results
         result['exit_reason'] = output.exit_reason
-        result['steps'] = len(output.trajectory)
-        result['execution_time'] = output.max_execution_time
-        
+        result['steps'] = output.num_steps
+        result['execution_time'] = output.total_time_traj
+
         # Calculate reward
         try:
             reward = env.runtime._calculate_reward()
@@ -101,12 +102,14 @@ def run_agent_on_sample(sample, idx, total):
             result['reward'] = None
             result['reward_error'] = str(e)
             print(f'Reward error: {e}')
-        
-        # Save trajectory
+
+        # Save trajectory (handle numpy types in serialization)
         traj_file = OUTPUT_DIR / f'trajectory_{sample["instance_id"]}.json'
-        output.save(str(traj_file))
+        traj_data = output.model_dump()
+        with open(traj_file, 'w') as f:
+            json.dump(traj_data, f, indent=2, default=lambda o: o.tolist() if isinstance(o, np.ndarray) else str(o))
         result['trajectory_file'] = str(traj_file)
-        
+
         print(f'Exit reason: {output.exit_reason}')
         print(f'Steps: {result["steps"]}')
         print(f'Time: {result["execution_time"]:.1f}s')

@@ -350,35 +350,65 @@ class DockerRuntime(ExecutionEnvironment):
     def start_container(
         self, docker_image: str, command: str, ctr_name: str, **docker_kwargs
     ):
-        # Start or reuse a container
-        try:
-            if self.backend == "docker":
-                containers = self.client.containers.list(
-                    all=True, filters={"name": ctr_name}
-                )
-                if containers:
-                    self.container = containers[0]
-                    if self.container.status != "running":
-                        self.container.start()
-                else:
-                    self.container = self.client.containers.run(
-                        docker_image,
-                        command,
-                        name=ctr_name,
-                        detach=True,
-                        tty=True,
-                        stdin_open=True,
-                        # environment={"PATH": "/commands"},
-                        **docker_kwargs,
+        """Start or reuse a Docker container with retry mechanism."""
+        max_retries = 3
+        retry_delay = 30  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                if self.backend == "docker":
+                    containers = self.client.containers.list(
+                        all=True, filters={"name": ctr_name}
                     )
-            elif self.backend == "kubernetes":
-                self._start_kubernetes_pod(
-                    docker_image, command, ctr_name, **docker_kwargs
+                    if containers:
+                        self.container = containers[0]
+                        if self.container.status != "running":
+                            self.logger.info("Restarting existing container: %s", ctr_name)
+                            self.container.start()
+                        else:
+                            self.logger.info("Reusing running container: %s", ctr_name)
+                    else:
+                        self.logger.info("Creating new container for image: %s", docker_image)
+                        self.container = self.client.containers.run(
+                            docker_image,
+                            command,
+                            name=ctr_name,
+                            detach=True,
+                            tty=True,
+                            stdin_open=True,
+                            **docker_kwargs,
+                        )
+                        self.logger.info("Container created successfully: %s", ctr_name)
+                elif self.backend == "kubernetes":
+                    self._start_kubernetes_pod(
+                        docker_image, command, ctr_name, **docker_kwargs
+                    )
+                
+                # Success - exit retry loop
+                return
+                
+            except Exception as e:
+                error_msg = repr(e)
+                self.logger.error(
+                    "Container start failed (attempt %d/%d): %s - %s",
+                    attempt + 1, max_retries, docker_image, error_msg
                 )
-        except Exception as e:
-            print("Container start error:", repr(e))
-            self.stop_container()
-            return
+                
+                # Check if it's a rate limit error
+                if "429" in error_msg or "Too Many Requests" in error_msg:
+                    self.logger.warning("Docker Hub rate limit hit. Waiting %ds before retry...", retry_delay * 2)
+                    time.sleep(retry_delay * 2)
+                elif attempt < max_retries - 1:
+                    self.logger.info("Retrying in %ds...", retry_delay)
+                    time.sleep(retry_delay)
+                
+                # Clean up failed container
+                self.stop_container()
+        
+        # All retries failed - raise exception
+        error_msg = f"Failed to start container after {max_retries} attempts: {docker_image}"
+        self.logger.error(error_msg)
+        raise RuntimeError(error_msg)
 
     def _stop_kubernetes_pod(self):
         try:

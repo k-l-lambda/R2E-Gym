@@ -39,6 +39,7 @@ traj_lite/
 traj_swebv/
 traj_testgen_final/
 traj_testverifier_r2e/
+traj_*/
 notebooks/
 
 # Byte-compiled / optimized / DLL files
@@ -204,3 +205,6 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 # src/r2e_edits/agenthub/train/results_traj_verifier-14B-v2.csv
+
+*.local
+*.local.*

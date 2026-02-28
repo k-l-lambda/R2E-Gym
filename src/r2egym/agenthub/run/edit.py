@@ -287,6 +287,89 @@ def runagent(
     return trajectory.model_dump_json()
 
 
+def runagent_passk(
+    ds,
+    exp_name: Optional[str] = None,
+    max_steps=40,
+    max_steps_absolute=50,
+    llm_name="gpt-4o",
+    temperature=1.0,
+    use_fn_calling: bool = True,
+    backend: str = "docker",
+    max_reward_calc_time: int = 300,
+    scaffold: str = "r2egym",
+    max_tokens: int = 65536,
+    sample_id: int = 0,
+) -> Optional[str]:
+    """
+    Run a single independent sample for pass@k evaluation.
+    Each call creates its own env, runs the agent once, calculates reward, and returns.
+    The sample_id is stored in exp_name for identification.
+    """
+    if exp_name is None:
+        exp_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    sample_exp_name = f"{exp_name}_s{sample_id}"
+    logger_inst = setup_logging(
+        name=f"{ds['docker_image'].replace('/', '_')}_s{sample_id}",
+        log_file=f"run_logs/{exp_name}/{ds['docker_image'].replace('/', '_')}_s{sample_id}.log",
+        console=True,
+        level=INFO,
+    )
+    logger_inst.info(f"Starting pass@k sample {sample_id} on Docker image: {ds['docker_image']}")
+    logger_inst.info(f"Using LLM: {llm_name}, temperature: {temperature}")
+
+    assert scaffold in ["r2egym", "sweagent", "openhands"], f"Scaffold is {scaffold}, must be one of [r2egym, sweagent, openhands]"
+
+    # Each sample gets its own independent env
+    env_args = EnvArgs(ds=ds)
+    env = RepoEnv(env_args, logger=logger_inst, backend=backend)
+
+    if use_fn_calling:
+        assert scaffold != "sweagent", "SWEagent scaffold does not support fn calling"
+        agent_args = AgentArgs.from_yaml(
+            Path(f"./src/r2egym/agenthub/config/{scaffold}/edit_fn_calling.yaml")
+        )
+    else:
+        agent_args = AgentArgs.from_yaml(
+            Path(f"./src/r2egym/agenthub/config/{scaffold}/edit_non_fn_calling.yaml")
+        )
+    agent_args.llm_name = llm_name
+
+    agent = Agent(name="EditAgent", args=agent_args, logger=logger_inst)
+
+    # Single run — no restarts, no iterations
+    try:
+        trajectory = agent.run(
+            env,
+            max_steps=max_steps,
+            temperature=temperature,
+            max_steps_absolute=max_steps_absolute,
+            use_fn_calling=use_fn_calling,
+            scaffold=scaffold,
+            max_token_limit=max_tokens,
+        )
+
+        # Calculate reward for THIS sample
+        reward_calc_time = time.time()
+        reward, test_output = env.runtime._calculate_reward(get_test_output=True, timeout=max_reward_calc_time)
+        reward_calc_time = time.time() - reward_calc_time
+
+        trajectory.reward = reward
+        trajectory.test_output = test_output
+        trajectory.ds = ds
+        trajectory.exp_name = sample_exp_name
+        trajectory.reward_calc_time = reward_calc_time
+        logger_inst.warning(f"pass@k sample {sample_id}: reward={reward}, calc_time={reward_calc_time:.2f}s")
+
+        return trajectory.model_dump_json()
+    except Exception as e:
+        logger_inst.error(f"Error during agent run for sample {sample_id}: {e}")
+        return None
+    finally:
+        env.close()
+
+
 def runagent_multiple(
     dataset: str,
     split: str,
@@ -309,6 +392,7 @@ def runagent_multiple(
     scaffold: str = "r2egym",
     prepull_images: bool = False,
     max_tokens: int = 65536,
+    n_samples: int = 1,
 ):
     """
     Runs the editagent agent on the first k Docker images.
@@ -363,11 +447,21 @@ def runagent_multiple(
                     except:
                         print("error in jsonl file")
 
-            ds_selected = [
-                ds_entry
-                for ds_entry in ds_selected
-                if ds_entry["docker_image"] not in existing_dockers
-            ]
+            if n_samples > 1:
+                # For pass@k: skip instances that already have n_samples entries
+                from collections import Counter
+                docker_counts = Counter(existing_dockers)
+                ds_selected = [
+                    ds_entry
+                    for ds_entry in ds_selected
+                    if docker_counts.get(ds_entry["docker_image"], 0) < n_samples
+                ]
+            else:
+                ds_selected = [
+                    ds_entry
+                    for ds_entry in ds_selected
+                    if ds_entry["docker_image"] not in existing_dockers
+                ]
 
     if skip_existing:
         old_jsonl_files_glob = f"{exp_name[:-1]}*"
@@ -396,44 +490,76 @@ def runagent_multiple(
         prepull_docker_images(ds_selected, max_workers=max_workers)
         logger.info("Docker image prepull completed.")
 
-    # with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks to the executor using keyword arguments
-        future_to_image = {
-            executor.submit(
-                runagent,
-                ds=ds_entry,
-                exp_name=exp_name,
-                max_steps=max_steps,
-                num_restarts=num_restarts,
-                max_steps_absolute=max_steps_absolute,
-                llm_name=llm_name,
-                temperature=temperature,
-                use_fn_calling=use_fn_calling,
-                backend=backend,
-                max_reward_calc_time=max_reward_calc_time,
-                max_iterations=max_iterations,
-                scaffold=scaffold,
-                max_tokens=max_tokens,
-            ): ds_entry[
-                "docker_image"
-            ]  # <-- store the docker_image from ds_entry here
-            for ds_entry in ds_selected
-        }
+    if n_samples > 1:
+        # pass@k mode: run n_samples independent trials per instance
+        logger.info(f"pass@k mode: n_samples={n_samples}, temperature={temperature}")
+        logger.info(f"Total tasks: {len(ds_selected)} instances x {n_samples} samples = {len(ds_selected) * n_samples}")
 
-        with open(jsonl_file, "a") as f:
-            for future in concurrent.futures.as_completed(future_to_image):
-                docker_image = future_to_image[
-                    future
-                ]  # <-- retrieve that stored docker_image
-                try:
-                    result = future.result()
-                    if result is not None:
-                        with file_lock:
-                            f.write(result + "\n")
-                except Exception as e:
-                    # Use docker_image from above when logging
-                    logger.error(f"Exception for Docker image {docker_image}: {e}")
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            future_to_info = {}
+            for ds_entry in ds_selected:
+                for sample_id in range(n_samples):
+                    future = executor.submit(
+                        runagent_passk,
+                        ds=ds_entry,
+                        exp_name=exp_name,
+                        max_steps=max_steps,
+                        max_steps_absolute=max_steps_absolute,
+                        llm_name=llm_name,
+                        temperature=temperature,
+                        use_fn_calling=use_fn_calling,
+                        backend=backend,
+                        max_reward_calc_time=max_reward_calc_time,
+                        scaffold=scaffold,
+                        max_tokens=max_tokens,
+                        sample_id=sample_id,
+                    )
+                    future_to_info[future] = (ds_entry["docker_image"], sample_id)
+
+            with open(jsonl_file, "a") as f:
+                for future in concurrent.futures.as_completed(future_to_info):
+                    docker_image, sample_id = future_to_info[future]
+                    try:
+                        result = future.result()
+                        if result is not None:
+                            with file_lock:
+                                f.write(result + "\n")
+                    except Exception as e:
+                        logger.error(f"Exception for {docker_image} sample {sample_id}: {e}")
+    else:
+        # Original single-sample mode
+        # with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            future_to_image = {
+                executor.submit(
+                    runagent,
+                    ds=ds_entry,
+                    exp_name=exp_name,
+                    max_steps=max_steps,
+                    num_restarts=num_restarts,
+                    max_steps_absolute=max_steps_absolute,
+                    llm_name=llm_name,
+                    temperature=temperature,
+                    use_fn_calling=use_fn_calling,
+                    backend=backend,
+                    max_reward_calc_time=max_reward_calc_time,
+                    max_iterations=max_iterations,
+                    scaffold=scaffold,
+                    max_tokens=max_tokens,
+                ): ds_entry["docker_image"]
+                for ds_entry in ds_selected
+            }
+
+            with open(jsonl_file, "a") as f:
+                for future in concurrent.futures.as_completed(future_to_image):
+                    docker_image = future_to_image[future]
+                    try:
+                        result = future.result()
+                        if result is not None:
+                            with file_lock:
+                                f.write(result + "\n")
+                    except Exception as e:
+                        logger.error(f"Exception for Docker image {docker_image}: {e}")
 
     logger.info(f"editagent completed on {len(ds_selected)} Docker images.")
 
@@ -443,6 +569,7 @@ if __name__ == "__main__":
     Fire(
         {
             "runagent": runagent,
+            "runagent_passk": runagent_passk,
             "runagent_multiple": runagent_multiple,
         }
     )

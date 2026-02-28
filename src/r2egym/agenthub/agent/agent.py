@@ -29,7 +29,7 @@ from r2egym.agenthub.tools import (
 )
 import traceback
 logger = get_logger(__name__)  # Logger for this module
-MAX_CONTEXT_TOKENS = 65536
+MAX_CONTEXT_TOKENS = 98304
 
 ##############################################################################
 # AgentArgs Dataclass

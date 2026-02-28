@@ -254,8 +254,8 @@ class DockerRuntime(ExecutionEnvironment):
                         },
                     }
                 ],
-                "imagePullSecrets": [{"name": "dockerhub-pro"}],
-                "nodeSelector": {"karpenter.sh/nodepool": "bigcpu-standby"},
+                "imagePullSecrets": [{"name": "dockerhub"}],
+                "nodeSelector": {"workload": "r2e-eval"},
                 "tolerations": [
                     {
                         "key": "node.kubernetes.io/disk-pressure",

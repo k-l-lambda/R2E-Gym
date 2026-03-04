@@ -393,13 +393,15 @@ def runagent_multiple(
     prepull_images: bool = False,
     max_tokens: int = 65536,
     n_samples: int = 1,
-    # If True, process instances in reverse dataset order.
-    # Useful for two-node parallel pass@k collection: node A runs forward,
-    # node B runs --reverse_order so they cover complementary instances first.
+    # If True, process instances in reverse order.
+    # Useful for two-node parallel pass@k collection: node A runs forward (default),
+    # node B runs with --reverse_order so the two nodes start from opposite ends,
+    # minimising overlap and maximising throughput early in the run.
     reverse_order: bool = False,
-    # Comma-separated paths to JSONL output files from OTHER nodes.
-    # Used for cross-node deduplication in pass@k collection: instances that
-    # already have >= n_samples entries across all nodes are skipped.
+    # Comma-separated paths to completed JSONL files from other nodes.
+    # Used for cross-node deduplication when collecting pass@k samples in parallel:
+    # instances that already have >= n_samples entries across all nodes are skipped,
+    # so no docker image is evaluated more times than requested.
     extra_jsonl: str = "",
 ):
     """
@@ -488,14 +490,12 @@ def runagent_multiple(
                 if ds_entry["docker_image"] not in existing_dockers
             ]
 
-    # Cross-node deduplication for pass@k collection.
-    # When running on multiple nodes simultaneously (e.g. 2 nodes x 40 workers
-    # each collecting pass@16), each node needs to know how many samples the
-    # other nodes have already collected for each instance, so no instance
-    # accumulates more than n_samples total across the cluster.
-    # extra_jsonl accepts a comma-separated list of JSONL files from peer nodes;
-    # instances whose docker_image already appears >= n_samples times are skipped.
-    # Load extra JSONL files for cross-node dedup
+    # Cross-node deduplication for pass@k collection:
+    # When running pass@k across multiple nodes in parallel, each node may already
+    # have partial results for some instances. extra_jsonl points to the output
+    # JSONL(s) from other nodes so we can count existing samples per docker_image
+    # and skip any instance that already has >= n_samples completed elsewhere.
+    # (Only active when n_samples > 1; harmless no-op for standard pass@1 eval.)
     if extra_jsonl:
         from collections import Counter
         extra_dockers = []
@@ -520,7 +520,7 @@ def runagent_multiple(
                 if extra_counts.get(ds_entry["docker_image"], 0) < n_samples
             ]
 
-    if reverse_order:
+    if reverse_order:  # See parameter docstring above for rationale
         ds_selected = list(reversed(ds_selected))
         logger.info("Reversed instance order for processing.")
 

@@ -393,6 +393,14 @@ def runagent_multiple(
     prepull_images: bool = False,
     max_tokens: int = 65536,
     n_samples: int = 1,
+    # If True, process instances in reverse dataset order.
+    # Useful for two-node parallel pass@k collection: node A runs forward,
+    # node B runs --reverse_order so they cover complementary instances first.
+    reverse_order: bool = False,
+    # Comma-separated paths to JSONL output files from OTHER nodes.
+    # Used for cross-node deduplication in pass@k collection: instances that
+    # already have >= n_samples entries across all nodes are skipped.
+    extra_jsonl: str = "",
 ):
     """
     Runs the editagent agent on the first k Docker images.
@@ -479,6 +487,42 @@ def runagent_multiple(
                 for ds_entry in ds_selected
                 if ds_entry["docker_image"] not in existing_dockers
             ]
+
+    # Cross-node deduplication for pass@k collection.
+    # When running on multiple nodes simultaneously (e.g. 2 nodes x 40 workers
+    # each collecting pass@16), each node needs to know how many samples the
+    # other nodes have already collected for each instance, so no instance
+    # accumulates more than n_samples total across the cluster.
+    # extra_jsonl accepts a comma-separated list of JSONL files from peer nodes;
+    # instances whose docker_image already appears >= n_samples times are skipped.
+    # Load extra JSONL files for cross-node dedup
+    if extra_jsonl:
+        from collections import Counter
+        extra_dockers = []
+        for extra_path in extra_jsonl.split(","):
+            extra_path = extra_path.strip()
+            if extra_path:
+                try:
+                    with open(extra_path) as ef:
+                        for line in ef:
+                            try:
+                                extra_dockers.append(json.loads(line)["ds"]["docker_image"])
+                            except:
+                                pass
+                    logger.info(f"Loaded {len(extra_dockers)} entries from extra JSONL: {extra_path}")
+                except FileNotFoundError:
+                    logger.warning(f"Extra JSONL not found: {extra_path}")
+        if extra_dockers and n_samples > 1:
+            extra_counts = Counter(extra_dockers)
+            # Combine with existing counts from use_existing
+            ds_selected = [
+                ds_entry for ds_entry in ds_selected
+                if extra_counts.get(ds_entry["docker_image"], 0) < n_samples
+            ]
+
+    if reverse_order:
+        ds_selected = list(reversed(ds_selected))
+        logger.info("Reversed instance order for processing.")
 
     logger.info(
         f"Starting editagent on {len(ds_selected)} Docker images after filtering."

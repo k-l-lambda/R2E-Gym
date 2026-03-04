@@ -29,7 +29,29 @@ from r2egym.agenthub.tools import (
 )
 import traceback
 logger = get_logger(__name__)  # Logger for this module
-MAX_CONTEXT_TOKENS = 98304
+# MAX_CONTEXT_TOKENS: pre-check limit applied before each LLM API call (see _count_tokens + model_query).
+#
+# BUG HISTORY (2026-03-04):
+#   Original value was 65536 (64K), later bumped to 98304 (96K) in a previous commit.
+#   Both values caused excessive llm_query_error (~28-82% of instances) when evaluating
+#   DeepSWE-Preview (Qwen3-32B) because _count_tokens() calls litellm.token_counter(),
+#   which internally falls back to tiktoken (OpenAI BPE, ~100K vocab) for any non-GPT
+#   model name.  Qwen3 uses its own BPE (~150K vocab) and merges CJK / code tokens more
+#   aggressively, so tiktoken splits a single Qwen3 token into multiple sub-tokens.
+#   Net effect: ~6x overcount on <think>...</think> reasoning text.
+#   Example: a real 11K-token Qwen3 conversation was reported as 65K+ by tiktoken,
+#   triggering a false pre-check failure and premature llm_query_error exit.
+#
+#   FIX (2026-03-04): Set to 1_000_000 to effectively disable the tiktoken pre-check for
+#   locally-hosted Qwen3 / DeepSWE models.  The actual 64K context limit is correctly
+#   enforced by the post-response check in the agent step loop (~line 522 below):
+#       if total_tokens >= max_token_limit:   # total_tokens = usage.total_tokens from API
+#   That value comes directly from vLLM's response usage field, which is always the
+#   accurate Qwen3 token count.
+#
+#   TODO: replace the _count_tokens() pre-check with the usage-based approach, or use the
+#   model's actual tokenizer (via AutoTokenizer) instead of tiktoken.
+MAX_CONTEXT_TOKENS = 1000000
 
 ##############################################################################
 # AgentArgs Dataclass
@@ -145,6 +167,12 @@ class Agent:
         """
         Counts the tokens for a list of messages using the litellm library.
         Adjust as needed depending on the model and library.
+
+        WARNING: litellm.token_counter() falls back to tiktoken for non-GPT model names.
+        tiktoken overcounts Qwen3-based models (e.g. DeepSWE-Preview) by ~6x because
+        their vocabularies differ.  This estimate is used ONLY for the MAX_CONTEXT_TOKENS
+        pre-check, which is currently set to 1_000_000 (effectively disabled).
+        For accurate token counts use usage.total_tokens from the API response.
         """
         token_count = litellm.token_counter(model=self.llm_name, messages=messages)
         self.logger.info(f"Total tokens in conversation: {token_count}")

@@ -417,24 +417,86 @@ For each `NEW_COMMIT_BETTER` commit, the pipeline generates:
 
 ### Step 9 — Generate synthetic issues (SWE-GEN Stage 3)
 
-Synthetic issue generation requires a running LLM server. By default
-`build_syn_issue()` is called with `do_llm=False`, so the prompt is stored
-but no LLM call is made.
+Synthetic issue generation requires an LLM. The pipeline supports two
+approaches:
 
-To enable LLM-generated issues, ensure a vLLM server is running:
+#### Option A — Using PPIO API (recommended for remote/cloud setups)
+
+We use PPIO's OpenAI-compatible API with GPT-5.2 to generate issues from
+the backtranslation prompts already stored in the JSONL file.
 
 ```bash
-# Example: start vLLM with Qwen3-32B
+# Set API key (defined in ~/.bashrc)
+export PPIO_LLM_API_KEY="sk_..."
+
+# Run the generation script
+python scripts/generate_issues_ppio.py
+```
+
+The script reads `repo_datasets/rich.jsonl`, sends each row's `prompt` to
+GPT-5.2 via `https://api.ppinfra.com/v3/openai`, extracts the `[ISSUE]`
+block from the LLM response, and writes back both JSONL and Parquet.
+
+**Configuration** (in `scripts/generate_issues_ppio.py`):
+
+| Variable | Value |
+|----------|-------|
+| `BASE_URL` | `https://api.ppinfra.com/v3/openai` |
+| `MODEL` | `pa/gpt-5.2` |
+| `MAX_TOKENS` | `12000` |
+| `temperature` | `0.7` |
+
+**Result from our N=50 sample (2 valid rows):**
+
+| Commit | Issue Length | Tokens Used |
+|--------|-------------|-------------|
+| `00181151a4a6` | 1,255 chars | 3,757 |
+| `01b85ac116c4` | 1,267 chars | 3,968 |
+
+#### Option B — Using other-agent-mcp as MCP tool
+
+The `other-agent-mcp` project (`~/work/other-agent-mcp`) provides an MCP
+server that exposes LLM calls as tools for Claude Code. This is useful when
+you want to interactively generate or review issues within a Claude session.
+
+Setup:
+
+```bash
+# Build the MCP server
+cd ~/work/other-agent-mcp && npm install && npm run build
+
+# Add to Claude Code
+claude mcp add -s user subagent \
+  -e "SUBAGENT_PROVIDER=openai" \
+  -e "SUBAGENT_BASE_URL=https://api.ppinfra.com/v3/openai" \
+  -e "SUBAGENT_API_KEY=$PPIO_LLM_API_KEY" \
+  -e 'SUBAGENT_MODELS={"gpt-5.2":"pa/gpt-5.2"}' \
+  -- node ~/work/other-agent-mcp/dist/index.js
+```
+
+Then use the `run_agent` tool in Claude Code to generate individual issues:
+
+```
+mcp__subagent__run_agent(prompt="<backtranslation prompt>", model="gpt-5.2")
+```
+
+#### Option C — Using vLLM (for local GPU setups)
+
+If a local GPU is available, start a vLLM server:
+
+```bash
 vllm serve Qwen/Qwen3-32B --port 8000
 ```
 
 The `repo_testextract.py` script will call the LLM through
 `litellm.completion()` using the `--model` and `--base_url` arguments.
 
-The LLM receives: the commit patch (without test diffs), the test diff,
-old-commit failure output, new-commit success output, and a set of few-shot
-example issues. It generates a realistic GitHub issue describing the bug from
-a user's perspective, without revealing the fix.
+---
+
+**What the LLM receives:** the commit patch (without test diffs), the test
+diff, old-commit failure output, new-commit success output, and a set of
+few-shot example issues. It generates a realistic GitHub issue describing
+the bug from a user's perspective, without revealing the fix.
 
 ---
 
@@ -599,21 +661,25 @@ has the following fields:
 
 ### 8.5 Filling in `problem_statement` (Synthetic Issue Generation)
 
-The `problem_statement` field is empty when no LLM server is available.
-To fill it in using `recollect_issues.py`:
+The `problem_statement` field is empty after Step 8.3 (no LLM was called).
+Use the PPIO API script to fill it in:
 
 ```bash
-# Ensure repo_datasets/rich.jsonl exists (from Step 8.3)
-# Then start an LLM server and run:
-python src/r2egym/repo_analysis/recollect_issues.py
+export PPIO_LLM_API_KEY="sk_..."  # or source ~/.bashrc
+python scripts/generate_issues_ppio.py
 ```
 
-This script reads `repo_datasets/*.jsonl`, sends each row's prompt to the
-LLM (OpenAI API by default, configurable), and writes the generated issue
-back as `problem_statement`.
+This calls GPT-5.2 via PPIO's OpenAI-compatible API for each row, extracts
+the `[ISSUE]...[/ISSUE]` block, and writes back both JSONL and Parquet.
 
-Alternatively, you can use any LLM API to generate issues from the
-`prompt` field in the JSONL/Parquet files.
+Alternatively, the original `recollect_issues.py` script can be used with
+any OpenAI-compatible endpoint:
+
+```bash
+OPENAI_API_KEY="$PPIO_LLM_API_KEY" \
+OPENAI_BASE_URL="https://api.ppinfra.com/v3/openai" \
+python src/r2egym/repo_analysis/recollect_issues.py
+```
 
 ### 8.6 Loading into HuggingFace Datasets
 

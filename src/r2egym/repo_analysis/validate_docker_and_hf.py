@@ -97,6 +97,8 @@ def get_issues_for_repo(repo_name: str):
             return issues.orange3_issues
         case "tornado":
             return issues.tornado_issues
+        case "rich":
+            return issues.rich_issues
 
     raise ValueError(f"No issues found for repo {repo_name}")
 

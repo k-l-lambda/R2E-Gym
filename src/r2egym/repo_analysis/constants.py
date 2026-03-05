@@ -20,6 +20,7 @@ repo_str_names = [
     "coveragepy",
     "orange3",
     "bokeh",
+    "rich",
 ]
 for repo_str_name in repo_str_names:
     globals()[repo_str_name.upper() + "_DIR"] = Path(repo_str_name)

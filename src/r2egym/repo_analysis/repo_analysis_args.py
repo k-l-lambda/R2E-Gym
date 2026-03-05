@@ -20,6 +20,7 @@ class RepoName(str, Enum):
     coveragepy = "coveragepy"
     orange3 = "orange3"
     bokeh = "bokeh"
+    rich = "rich"
 
 
 class RepoAnalysisArgs(BaseModel):
@@ -53,7 +54,7 @@ class RepoAnalysisArgs(BaseModel):
 
     @property
     def parameterized_dockerfile(self):
-        return f"src/r2e_edits/repo_analysis/base_dockerfiles/Dockerfile.{self.repo_name.value}"
+        return f"src/r2egym/repo_analysis/base_dockerfiles/Dockerfile.{self.repo_name.value}"
 
     ## TODO: remove these old install configurations, now we use `install_utils/{repo_name}_install.sh`
     # @property
@@ -110,6 +111,8 @@ class RepoAnalysisArgs(BaseModel):
         if self.repo_name == RepoName.orange3:
             return "QT_QPA_PLATFORM=minimal PYTHONWARNINGS='ignore::UserWarning,ignore::SyntaxWarning' xvfb-run --auto-servernum .venv/bin/python -W ignore -m pytest -rA r2e_tests"
         if self.repo_name == RepoName.bokeh:
+            return "PYTHONWARNINGS='ignore::UserWarning,ignore::SyntaxWarning' .venv/bin/python -W ignore -m pytest -rA r2e_tests"
+        if self.repo_name == RepoName.rich:
             return "PYTHONWARNINGS='ignore::UserWarning,ignore::SyntaxWarning' .venv/bin/python -W ignore -m pytest -rA r2e_tests"
         raise NotImplementedError("only sympy is supported for now")
 

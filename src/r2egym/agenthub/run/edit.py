@@ -201,6 +201,7 @@ def runagent(
     max_iterations: int = 1,
     scaffold: str = "r2egym",
     max_tokens: int = 65536,
+    base_url: Optional[str] = None,
 ) -> Optional[str]:
     """
     Runs the editagent agent on a specified Docker image.
@@ -242,6 +243,8 @@ def runagent(
             Path(f"./src/r2egym/agenthub/config/{scaffold}/edit_non_fn_calling.yaml")
         )
     agent_args.llm_name = llm_name
+    if base_url:
+        agent_args.llm_base_url = base_url
 
     # Initialize the agent
     agent = Agent(name="EditAgent", args=agent_args, logger=logger)
@@ -300,6 +303,7 @@ def runagent_passk(
     scaffold: str = "r2egym",
     max_tokens: int = 65536,
     sample_id: int = 0,
+    base_url: Optional[str] = None,
 ) -> Optional[str]:
     """
     Run a single independent sample for pass@k evaluation.
@@ -335,6 +339,8 @@ def runagent_passk(
             Path(f"./src/r2egym/agenthub/config/{scaffold}/edit_non_fn_calling.yaml")
         )
     agent_args.llm_name = llm_name
+    if base_url:
+        agent_args.llm_base_url = base_url
 
     agent = Agent(name="EditAgent", args=agent_args, logger=logger_inst)
 
@@ -403,6 +409,7 @@ def runagent_multiple(
     # instances that already have >= n_samples entries across all nodes are skipped,
     # so no docker image is evaluated more times than requested.
     extra_jsonl: str = "",
+    base_url: Optional[str] = None,
 ):
     """
     Runs the editagent agent on the first k Docker images.
@@ -417,7 +424,10 @@ def runagent_multiple(
         prepull_images: Whether to prepull Docker images in parallel before starting execution.
     """
     # Load the dataset
-    ds = load_dataset(dataset, split=split)
+    if dataset.endswith(".parquet"):
+        ds = load_dataset("parquet", data_files=dataset, split="train")
+    else:
+        ds = load_dataset(dataset, split=split)
     logger.info(f"{len(ds)}, {k}, {start_idx}")
     # shuffle the dataset
     ds = ds.shuffle(seed=42)
@@ -557,6 +567,7 @@ def runagent_multiple(
                         scaffold=scaffold,
                         max_tokens=max_tokens,
                         sample_id=sample_id,
+                        base_url=base_url,
                     )
                     future_to_info[future] = (ds_entry["docker_image"], sample_id)
 

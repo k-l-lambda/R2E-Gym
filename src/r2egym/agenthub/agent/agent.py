@@ -91,12 +91,12 @@ class Agent:
             self.logger = logger
         self.llm_name = args.llm_name
 
-        self.llm_base_url = (
-            # "http://localhost:8000/v1"
-            os.environ.get("LLM_BASE_URL", "http://localhost:8000/v1")
-            if ("openai/" in self.llm_name) or ("hosted_vllm" in self.llm_name)
-            else None
-        )
+        if args.llm_base_url:
+            self.llm_base_url = args.llm_base_url
+        elif ("openai/" in self.llm_name) or ("hosted_vllm" in self.llm_name):
+            self.llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8000/v1")
+        else:
+            self.llm_base_url = None
         self.system_prompt_template = args.system_prompt
         self.instance_prompt_template = args.instance_prompt
         self.command_files = args.command_files
@@ -212,7 +212,7 @@ class Agent:
         # check if using locally hosted models
         using_local = "openai/" in self.llm_name or "hosted" in self.llm_name
         if using_local:
-            litellm.api_key = "sk-dummy"
+            litellm.api_key = os.environ.get("OPENAI_API_KEY", "sk-dummy")
 
         messages_ = copy.deepcopy(messages)
         total_tokens = self._count_tokens(messages_)
@@ -223,12 +223,15 @@ class Agent:
         # query the model with retries
         while retries < self.max_retries:
             try:
-                kwargs = {
-                    "tool_choice": "none",
-                    "function_call": None,
-                }
+                kwargs = {}
                 if tools:
-                    kwargs = {}
+                    pass  # let litellm handle tool_choice for native fn calling
+                elif self.use_fn_calling:
+                    # Explicitly disable tools when fn_calling scaffold but no tools provided
+                    kwargs["tool_choice"] = "none"
+                    kwargs["function_call"] = None
+                # When use_fn_calling=False (XML text tools in system prompt),
+                # do NOT pass tool_choice/function_call — they confuse some proxies
                 if "o3" not in self.llm_name and "o4" not in self.llm_name:
                     kwargs["temperature"] = temperature
                 response = litellm.completion(

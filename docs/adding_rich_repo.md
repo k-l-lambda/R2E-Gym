@@ -520,7 +520,127 @@ based on the 66% success rate observed in the N=50 sample.
 
 ---
 
-## 8. Summary of Code Changes
+## 8. Converting Raw Data to Training-Ready Formats
+
+After running the SWE-GEN pipeline (Steps 6-9), the raw data is scattered
+across multiple directories. This section covers converting it into the
+unified `DatasetRow` JSONL and Parquet formats used for training.
+
+### 8.1 Data Flow Overview
+
+```
+repos/rich_{hash}/execution_result.json  ─┐
+repos/rich_{hash}/parsed_commit.json     ─┼──► DatasetRow JSONL ──► Parquet / HuggingFace
+repos/rich_{hash}/syn_issue.json         ─┤
+commit_data/rich/{hash}.json             ─┘
+```
+
+### 8.2 Production Path vs. Local Path
+
+The production pipeline uses `validate_docker_and_hf.py`, which:
+1. Fetches Docker image tags from DockerHub (`fetch_docker_tags()`)
+2. Pulls each Docker image and re-validates tests inside the container
+3. Runs `file_relevance_filter()` (removes files from the patch one at a
+   time and checks if tests still fail — requires running Docker containers)
+4. Assembles `DatasetRow` objects and writes to `repo_datasets/<repo>.jsonl`
+
+For local development (images not pushed to DockerHub), use the standalone
+conversion script at `scripts/convert_rich_to_jsonl.py`.
+
+### 8.3 Running the Local Conversion Script
+
+```bash
+source .venv/bin/activate
+python scripts/convert_rich_to_jsonl.py
+```
+
+This script:
+- Scans `repos/rich_*` directories for `execution_result.json` files
+- Filters to only `NEW_COMMIT_BETTER` commits
+- Reads `parsed_commit.json`, `execution_result.json`, `syn_issue.json`
+- Builds `DatasetRow` objects (same Pydantic schema as production)
+- Writes `repo_datasets/rich.jsonl` (one JSON line per environment)
+- Writes `repo_datasets/rich.parquet` (same data, columnar format)
+
+**Result from N=50 sample run:**
+
+```
+Found 3 repo directories for rich
+  OK: DatasetRow created for 00181151a4a6
+  OK: DatasetRow created for 01b85ac116c4
+  SKIP: 02dffcf9cfe0... is NEW_COMMIT_NOT_BETTER
+
+Written 2 rows to repo_datasets/rich.jsonl
+Written 2 rows to repo_datasets/rich.parquet
+Parquet shape: (2, 14)
+```
+
+### 8.4 DatasetRow Schema
+
+The `DatasetRow` Pydantic model (defined in `validate_docker_and_hf.py`)
+has the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `repo_name` | str | Repository name (e.g., "rich") |
+| `docker_image` | str | Full Docker image tag |
+| `commit_hash` | str | The new (fixed) commit hash |
+| `parsed_commit_content` | str | JSON-serialized ParsedCommit |
+| `execution_result_content` | str | JSON-serialized ExecutionResult |
+| `modified_files` | list[str] | All files changed in the commit |
+| `relevant_files` | list[str] | Non-test files whose changes affect test outcomes |
+| `modified_entity_summaries` | list[dict] | Summary of edited functions/classes |
+| `num_non_test_files` | int | Number of non-test files modified |
+| `num_non_test_func_methods` | int | Number of non-test functions/methods edited |
+| `num_non_test_lines` | int | Lines changed in non-test files |
+| `prompt` | str | Backtranslation prompt sent to the LLM |
+| `problem_statement` | str | LLM-generated synthetic issue (empty if no LLM) |
+| `expected_output_json` | str | Expected pytest output (JSON) |
+
+### 8.5 Filling in `problem_statement` (Synthetic Issue Generation)
+
+The `problem_statement` field is empty when no LLM server is available.
+To fill it in using `recollect_issues.py`:
+
+```bash
+# Ensure repo_datasets/rich.jsonl exists (from Step 8.3)
+# Then start an LLM server and run:
+python src/r2egym/repo_analysis/recollect_issues.py
+```
+
+This script reads `repo_datasets/*.jsonl`, sends each row's prompt to the
+LLM (OpenAI API by default, configurable), and writes the generated issue
+back as `problem_statement`.
+
+Alternatively, you can use any LLM API to generate issues from the
+`prompt` field in the JSONL/Parquet files.
+
+### 8.6 Loading into HuggingFace Datasets
+
+```python
+from datasets import Dataset
+import pandas as pd
+
+df = pd.read_parquet("repo_datasets/rich.parquet")
+ds = Dataset.from_pandas(df)
+
+# Push to HuggingFace Hub
+ds.push_to_hub("your-org/rich-swe-gym", split="train")
+```
+
+### 8.7 Note on `relevant_files`
+
+The local conversion script uses a simple heuristic for `relevant_files`:
+non-test files from the commit's modified file list. The production
+pipeline uses `file_relevance_filter()`, which is more precise — it
+removes each non-test file from the patch individually and checks whether
+the tests still fail inside a Docker container. For production-quality
+data, run the full `validate_docker_and_hf.py` pipeline with Docker
+images pushed to DockerHub.
+
+---
+
+## 9. Summary of Code Changes
 
 | File | Change |
 |------|--------|
@@ -532,6 +652,7 @@ based on the 66% success rate observed in the N=50 sample.
 | `src/r2egym/repo_analysis/base_dockerfiles/Dockerfile.rich` | **New** — Docker template |
 | `src/r2egym/repo_analysis/issues/rich_issues.py` | **New** — example issues for few-shot prompting |
 | `src/r2e/` (stub package) | **New** — minimal stubs for `r2e.llms`, `r2e.paths`, `r2e.models`, `r2e.pat.*` |
+| `scripts/convert_rich_to_jsonl.py` | **New** — converts raw pipeline data to JSONL + Parquet |
 
 ---
 

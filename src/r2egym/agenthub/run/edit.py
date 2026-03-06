@@ -601,6 +601,7 @@ def runagent_multiple(
                     max_iterations=max_iterations,
                     scaffold=scaffold,
                     max_tokens=max_tokens,
+                    base_url=base_url,
                 ): ds_entry["docker_image"]
                 for ds_entry in ds_selected
             }

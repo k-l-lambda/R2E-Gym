@@ -71,11 +71,18 @@ def main():
 
             row["problem_statement"] = issue
             print(f"  OK: generated {len(issue)} chars")
-            print(f"  Preview: {issue[:200]}...")
+            print(f"  Preview: {issue[:150]}...")
             print(f"  Tokens used: {response.usage.total_tokens if response.usage else 'N/A'}")
         except Exception as e:
             print(f"  ERROR: {e}")
             continue
+
+        # Save progress every 10 rows
+        if (i + 1) % 10 == 0:
+            with open(JSONL_PATH, "w") as f_out:
+                for r in rows:
+                    f_out.write(json.dumps(r, ensure_ascii=False) + "\n")
+            print(f"  [checkpoint] Saved progress at row {i+1}")
 
     # Write JSONL
     with open(JSONL_PATH, "w") as f:

@@ -23,18 +23,18 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 ENV PATH="/root/.local/bin:${PATH}"
 
 # Use local repo copy instead of git clone to avoid network issues and timeouts.
-# Falls back to git clone if local_repo dir is not provided.
-# The build context should contain a 'local_repo' directory with the rich repo.
 COPY local_repo /testbed
 WORKDIR /testbed
+
+# Install dependencies BEFORE checkout so this layer is cached across commits
+COPY install.sh /testbed/install.sh
+RUN bash install.sh
+RUN uv pip install tree_sitter_languages
+
+# Checkout the specific commit (this invalidates cache per-commit, but install is cached)
 RUN git checkout $OLD_COMMIT
 
 COPY run_tests.sh /testbed/run_tests.sh
-COPY install.sh /testbed/install.sh
-
-RUN bash install.sh
-
-RUN uv pip install tree_sitter_languages
 
 # Clear proxy env for runtime
 ENV http_proxy=""
